@@ -176,11 +176,6 @@ defmodule Membrane.Core.Element do
   end
 
   @impl GenServer
-  def handle_info(Message.new(:push_mode_announcement, [], for_pad: ref), state) do
-    PadController.enable_toilet_if_pull(ref, state) |> noreply(state)
-  end
-
-  @impl GenServer
   def handle_info(Message.new(:handle_unlink, pad_ref), state) do
     PadController.handle_unlink(pad_ref, state) |> noreply(state)
   end
