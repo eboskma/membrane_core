@@ -72,8 +72,8 @@ defmodule Membrane.Core.Telemetry do
         parent_path: Membrane.ComponentPath.get_formatted(),
         from: "#{inspect(from_child)}",
         to: "#{inspect(to_child)}",
-        pad_from: "#{inspect(get_public_pad_name(from_pad))}",
-        pad_to: "#{inspect(get_public_pad_name(to_pad))}"
+        pad_from: "#{inspect(from_pad)}",
+        pad_to: "#{inspect(to_pad)}"
       }
     end
 
@@ -81,13 +81,5 @@ defmodule Membrane.Core.Telemetry do
       Telemetry.new_link_event_name(),
       calculate_measurement
     )
-  end
-
-  defp get_public_pad_name(pad) do
-    case pad do
-      {:private, direction} -> direction
-      {Membrane.Pad, {:private, direction}, ref} -> {Membrane.Pad, direction, ref}
-      _pad -> pad
-    end
   end
 end

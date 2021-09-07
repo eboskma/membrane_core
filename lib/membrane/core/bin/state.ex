@@ -9,7 +9,6 @@ defmodule Membrane.Core.Bin.State do
   use Bunch.Access
 
   alias Membrane.Core.{Playback, Timer}
-  alias Membrane.Core.Bin.LinkingBuffer
   alias Membrane.Core.Child.PadModel
   alias Membrane.Core.Parent.Link
   alias Membrane.Core.Parent.ChildrenModel
@@ -25,7 +24,6 @@ defmodule Membrane.Core.Bin.State do
           pads: PadModel.pads_t() | nil,
           watcher: pid | nil,
           controlling_pid: pid | nil,
-          linking_buffer: LinkingBuffer.t(),
           links: [Link.t()],
           crash_groups: %{CrashGroup.name_t() => CrashGroup.t()},
           synchronization: %{
@@ -55,8 +53,8 @@ defmodule Membrane.Core.Bin.State do
                 watcher: nil,
                 controlling_pid: nil,
                 crash_groups: %{},
-                linking_buffer: LinkingBuffer.new(),
                 children_log_metadata: [],
-                links: []
+                links: [],
+                pending_links: %{}
               ]
 end

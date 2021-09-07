@@ -5,10 +5,11 @@ defmodule Membrane.Core.Bin do
 
   import Membrane.Helper.GenServer
 
-  alias __MODULE__.{LinkingBuffer, State}
-  alias Membrane.{CallbackError, Core, ComponentPath, Pad, Sync}
+  alias __MODULE__.State
+  alias Membrane.{CallbackError, Core, ComponentPath, Sync}
+  alias Membrane.Core.Bin.PadController
   alias Membrane.Core.{CallbackHandler, Message}
-  alias Membrane.Core.Child.{PadController, PadSpecHandler}
+  alias Membrane.Core.Child.PadSpecHandler
 
   require Membrane.Core.Message
   require Membrane.Logger
@@ -103,6 +104,23 @@ defmodule Membrane.Core.Bin do
       }
       |> PadSpecHandler.init_pads()
 
+    state =
+      state.pads.info
+      |> Map.values()
+      |> Enum.filter(&(&1.availability == :always))
+      |> Enum.reduce(state, fn info, state ->
+        data =
+          Map.merge(info, %{
+            link_id: nil,
+            endpoint: nil,
+            linked?: false,
+            spec_ref: nil,
+            options: nil
+          })
+
+        put_in(state, [:pads, :data, info.name], data)
+      end)
+
     with {:ok, state} <-
            CallbackHandler.exec_and_handle_callback(
              :handle_init,
@@ -122,24 +140,15 @@ defmodule Membrane.Core.Bin do
   end
 
   @impl GenServer
-  # Bin-specific message.
-  # This forwards all :demand, :caps, :buffer, :event
-  # messages to an appropriate element.
-  def handle_info(Message.new(type, _args, for_pad: pad) = msg, state)
-      when type in [:demand, :caps, :buffer, :event] do
-    outgoing_pad =
-      pad
-      |> Pad.get_corresponding_bin_pad()
-
-    LinkingBuffer.store_or_send(msg, outgoing_pad, state)
-    ~> {:ok, &1}
+  def handle_info(Message.new(:handle_unlink, pad_ref), state) do
+    PadController.handle_pad_removed(pad_ref, state)
     |> noreply()
   end
 
   @impl GenServer
-  def handle_info(Message.new(:handle_unlink, pad_ref), state) do
-    PadController.handle_pad_removed(pad_ref, state)
-    |> noreply()
+  def handle_info(Message.new(:link_request, [pad_ref, direction, link_id, pad_props]), state) do
+    state = PadController.handle_link_request(pad_ref, direction, link_id, pad_props, state)
+    {:noreply, state}
   end
 
   @impl GenServer
@@ -154,14 +163,15 @@ defmodule Membrane.Core.Bin do
   end
 
   @impl GenServer
-  def handle_call(Message.new(:handle_link, [direction, this, other, other_info]), _from, state) do
-    PadController.handle_link(direction, this, other, other_info, state) |> reply()
-  end
+  def handle_call(
+        Message.new(:handle_link, [direction, this, other, other_info, metadata]),
+        _from,
+        state
+      ) do
+    {reply, state} =
+      PadController.handle_link(direction, this, other, other_info, metadata, state)
 
-  @impl GenServer
-  def handle_call(Message.new(:linking_finished), _from, state) do
-    PadController.handle_linking_finished(state)
-    |> reply()
+    {:reply, reply, state}
   end
 
   @impl GenServer
