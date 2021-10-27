@@ -22,9 +22,10 @@ defmodule Membrane.Core.Element do
 
   alias Membrane.{Clock, Element, Sync}
   alias Membrane.Core.Element.{LifecycleController, PadController, PlaybackBuffer, State}
-  alias Membrane.Core.{Child, Message, PlaybackHandler, TimerController}
+  alias Membrane.Core.{Message, PlaybackHandler, Telemetry, TimerController}
   alias Membrane.ComponentPath
   require Membrane.Core.Message
+  require Membrane.Core.Telemetry
   require Membrane.Logger
 
   @type options_t :: %{
@@ -45,27 +46,41 @@ defmodule Membrane.Core.Element do
   """
   @spec start_link(options_t, GenServer.options()) :: GenServer.on_start()
   def start_link(options, process_options \\ []),
-    do: do_start(:start_link, options, process_options)
+    do: start_link(node(), options, process_options)
+
+  @spec start_link(node(), options_t, GenServer.options()) :: GenServer.on_start()
+  def start_link(node, options, process_options) when is_atom(node),
+    do: do_start(node, :start_link, options, process_options)
 
   @doc """
   Works similarly to `start_link/5`, but does not link to the current process.
   """
   @spec start(options_t, GenServer.options()) :: GenServer.on_start()
   def start(options, process_options \\ []),
-    do: do_start(:start, options, process_options)
+    do: start(node(), options, process_options)
 
-  defp do_start(method, options, process_options) do
+  @spec start(node(), options_t, GenServer.options()) :: GenServer.on_start()
+  def start(node, options, process_options),
+    do: do_start(node, :start, options, process_options)
+
+  defp do_start(node, method, options, process_options) do
     %{module: module, name: name, user_options: user_options} = options
 
     if Element.element?(options.module) do
       Membrane.Logger.debug("""
       Element #{method}: #{inspect(name)}
+      node: #{node},
       module: #{inspect(module)},
       element options: #{inspect(user_options)},
       process options: #{inspect(process_options)}
       """)
 
-      apply(GenServer, method, [__MODULE__, options, process_options])
+      # rpc if necessary
+      if node == node() do
+        apply(GenServer, method, [__MODULE__, options, process_options])
+      else
+        :rpc.call(node, GenServer, method, [__MODULE__, options, process_options])
+      end
     else
       raise """
       Cannot start element, passed module #{inspect(module)} is not a Membrane Element.
@@ -91,18 +106,15 @@ defmodule Membrane.Core.Element do
 
   @impl GenServer
   def init(options) do
-    parent_monitor = Process.monitor(options.parent)
+    Process.monitor(options.parent)
     name_str = if String.valid?(options.name), do: options.name, else: inspect(options.name)
     :ok = Membrane.Logger.set_prefix(name_str)
-    Logger.metadata(options.log_metadata)
-
+    :ok = Logger.metadata(options.log_metadata)
     :ok = ComponentPath.set_and_append(options.log_metadata[:parent_path] || [], name_str)
 
-    state =
-      options
-      |> Map.take([:module, :name, :parent_clock, :sync])
-      |> Map.put(:parent_monitor, parent_monitor)
-      |> State.new()
+    Telemetry.report_init(:element)
+
+    state = Map.take(options, [:module, :name, :parent_clock, :sync, :parent]) |> State.new()
 
     with {:ok, state} <- LifecycleController.handle_init(options.user_options, state) do
       {:ok, state}
@@ -113,19 +125,16 @@ defmodule Membrane.Core.Element do
 
   @impl GenServer
   def terminate(reason, state) do
+    Telemetry.report_terminate(:element)
+
     {:ok, _state} = LifecycleController.handle_shutdown(reason, state)
 
     :ok
   end
 
   @impl GenServer
-  def handle_call(Message.new(:handle_watcher, watcher), _from, state) do
-    Child.LifecycleController.handle_watcher(watcher, state) |> reply(state)
-  end
-
-  @impl GenServer
-  def handle_call(Message.new(:set_controlling_pid, pid), _from, state) do
-    Child.LifecycleController.handle_controlling_pid(pid, state) |> reply(state)
+  def handle_call(Message.new(:get_clock), _from, state) do
+    reply({{:ok, state.synchronization.clock}, state})
   end
 
   @impl GenServer
@@ -151,59 +160,66 @@ defmodule Membrane.Core.Element do
   end
 
   @impl GenServer
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{parent_monitor: ref} = state) do
+  def handle_info({:DOWN, _ref, :process, parent_pid, reason}, %{parent_pid: parent_pid} = state) do
     {:ok, state} = LifecycleController.handle_pipeline_down(reason, state)
 
     {:stop, {:shutdown, :parent_crash}, state}
   end
 
   @impl GenServer
-  def handle_info(Message.new(:change_playback_state, new_playback_state), state) do
+  def handle_info(message, state) do
+    Telemetry.report_metric(
+      :queue_len,
+      :erlang.process_info(self(), :message_queue_len) |> elem(1)
+    )
+
+    do_handle_info(message, state)
+  end
+
+  @compile {:inline, do_handle_info: 2}
+
+  defp do_handle_info(Message.new(:change_playback_state, new_playback_state), state) do
     PlaybackHandler.change_playback_state(new_playback_state, LifecycleController, state)
     |> noreply(state)
   end
 
-  @impl GenServer
-  def handle_info(Message.new(type, _args, _opts) = msg, state)
-      when type in [:demand, :buffer, :caps, :event] do
+  defp do_handle_info(Message.new(type, _args, _opts) = msg, state)
+       when type in [:demand, :buffer, :caps, :event] do
     PlaybackBuffer.store(msg, state) |> noreply(state)
   end
 
-  @impl GenServer
-  def handle_info(Message.new(:handle_unlink, pad_ref), state) do
+  defp do_handle_info(Message.new(:handle_unlink, pad_ref), state) do
     PadController.handle_unlink(pad_ref, state) |> noreply(state)
   end
 
-  @impl GenServer
-  def handle_info(Message.new(:timer_tick, timer_id), state) do
+  defp do_handle_info(Message.new(:timer_tick, timer_id), state) do
     TimerController.handle_tick(timer_id, state) |> noreply(state)
   end
 
-  @impl GenServer
-  def handle_info(Message.new(:link_request, [_pad_ref, _direction, link_id, _pad_props]), state) do
+  defp do_handle_info(
+         Message.new(:link_request, [_pad_ref, _direction, link_id, _pad_props]),
+         state
+       ) do
     Membrane.Logger.debug("link request")
-    Message.send(state.watcher, :link_response, link_id)
+    Message.send(state.parent_pid, :link_response, link_id)
     {:noreply, state}
   end
 
-  @impl GenServer
-  def handle_info({:membrane_clock_ratio, clock, ratio}, state) do
+  defp do_handle_info({:membrane_clock_ratio, clock, ratio}, state) do
     TimerController.handle_clock_update(clock, ratio, state) |> noreply()
   end
 
-  @impl GenServer
-  def handle_info(Message.new(:log_metadata, metadata), state) do
+  defp do_handle_info(Message.new(:log_metadata, metadata), state) do
     :ok = Logger.metadata(metadata)
     noreply({:ok, state})
   end
 
-  def handle_info(Message.new(_, _, _) = message, state) do
+  defp do_handle_info(Message.new(_, _, _) = message, state) do
     {{:error, {:invalid_message, message, mode: :info}}, state}
     |> noreply(state)
   end
 
-  @impl GenServer
-  def handle_info(message, state) do
+  defp do_handle_info(message, state) do
     LifecycleController.handle_other(message, state) |> noreply(state)
   end
 end

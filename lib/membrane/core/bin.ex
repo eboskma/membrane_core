@@ -8,10 +8,11 @@ defmodule Membrane.Core.Bin do
   alias __MODULE__.State
   alias Membrane.{CallbackError, Core, ComponentPath, Sync}
   alias Membrane.Core.Bin.PadController
-  alias Membrane.Core.{CallbackHandler, Message}
+  alias Membrane.Core.{CallbackHandler, Message, Telemetry}
   alias Membrane.Core.Child.PadSpecHandler
 
   require Membrane.Core.Message
+  require Membrane.Core.Telemetry
   require Membrane.Logger
 
   @type options_t :: %{
@@ -34,28 +35,40 @@ defmodule Membrane.Core.Bin do
   Returns the same values as `GenServer.start_link/3`.
   """
   @spec start_link(options_t, GenServer.options()) :: GenServer.on_start()
-  def start_link(options, process_options \\ []) do
-    do_start(:start_link, options, process_options)
-  end
+  def start_link(options, process_options \\ []),
+    do: start_link(node(), options, process_options)
+
+  @spec start_link(node(), options_t, GenServer.options()) :: GenServer.on_start()
+  def start_link(node, options, process_options),
+    do: do_start(node, :start_link, options, process_options)
 
   @doc """
   Works similarly to `start_link/2`, but does not link to the current process.
   """
   @spec start(options_t(), GenServer.options()) :: GenServer.on_start()
-  def start(options, process_options \\ []) do
-    do_start(:start, options, process_options)
-  end
+  def start(options, process_options \\ []),
+    do: start(node(), options, process_options)
 
-  defp do_start(method, options, process_options) do
+  @spec start(node(), options_t(), GenServer.options()) :: GenServer.on_start()
+  def start(node, options, process_options),
+    do: do_start(node, :start, options, process_options)
+
+  defp do_start(node, method, options, process_options) do
     if options.module |> Membrane.Bin.bin?() do
       Membrane.Logger.debug("""
-      Bin start link: name: #{inspect(options.name)}
+      Bin #{method}: #{inspect(options.name)}
+      node: #{node},
       module: #{inspect(options.module)},
       bin options: #{inspect(options.user_options)},
       process options: #{inspect(process_options)}
       """)
 
-      apply(GenServer, method, [Membrane.Core.Bin, options, process_options])
+      # rpc if necessary
+      if node == node() do
+        apply(GenServer, method, [Membrane.Core.Bin, options, process_options])
+      else
+        :rpc.call(node, GenServer, method, [Membrane.Core.Bin, options, process_options])
+      end
     else
       raise """
       Cannot start bin, passed module #{inspect(options.module)} is not a Membrane Bin.
@@ -83,6 +96,8 @@ defmodule Membrane.Core.Bin do
     Logger.metadata(log_metadata)
     :ok = ComponentPath.set_and_append(log_metadata[:parent_path] || [], name_str <> " bin")
 
+    Telemetry.report_init(:bin)
+
     clock_proxy = Membrane.Clock.start_link(proxy: true) ~> ({:ok, pid} -> pid)
     clock = if Bunch.Module.check_behaviour(module, :membrane_clock?), do: clock_proxy, else: nil
 
@@ -90,6 +105,7 @@ defmodule Membrane.Core.Bin do
       %State{
         module: module,
         name: name,
+        parent_pid: options.parent,
         synchronization: %{
           parent_clock: options.parent_clock,
           timers: %{},
@@ -140,12 +156,6 @@ defmodule Membrane.Core.Bin do
   end
 
   @impl GenServer
-  def handle_call(Message.new(:set_controlling_pid, pid), _from, state) do
-    Core.Child.LifecycleController.handle_controlling_pid(pid, state)
-    |> reply()
-  end
-
-  @impl GenServer
   def handle_call(
         Message.new(:handle_link, [direction, this, other, other_info, metadata]),
         _from,
@@ -158,13 +168,14 @@ defmodule Membrane.Core.Bin do
   end
 
   @impl GenServer
-  def handle_call(Message.new(:handle_watcher, watcher), _from, state) do
-    Core.Child.LifecycleController.handle_watcher(watcher, state)
-    |> reply()
+  def handle_call(Message.new(:get_clock), _from, state) do
+    reply({{:ok, state.synchronization.clock}, state})
   end
 
   @impl GenServer
   def terminate(reason, state) do
+    Telemetry.report_terminate(:bin)
+
     :ok = state.module.handle_shutdown(reason, state.internal_state)
   end
 end

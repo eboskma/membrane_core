@@ -12,6 +12,7 @@ defmodule Membrane.Core.Parent.ChildLifeController.LinkHandler do
   alias Membrane.Pad
 
   require Membrane.Core.Message
+  require Membrane.Core.Telemetry
   require Membrane.Logger
   require Membrane.Pad
 
@@ -223,7 +224,7 @@ defmodule Membrane.Core.Parent.ChildLifeController.LinkHandler do
   end
 
   defp link(%Link{from: from, to: to}, state) do
-    Telemetry.report_new_link(from, to)
+    Telemetry.report_link(from, to)
     {:ok, _info} = Message.call(from.pid, :handle_link, [:output, from, to, nil, nil])
     Bunch.Access.update_in(state, [:links], &[%Link{from: from, to: to} | &1])
   end

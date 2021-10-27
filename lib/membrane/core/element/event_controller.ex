@@ -13,6 +13,7 @@ defmodule Membrane.Core.Element.EventController do
 
   require Membrane.Core.Child.PadModel
   require Membrane.Core.Message
+  require Membrane.Core.Telemetry
   require Membrane.Logger
 
   @spec handle_start_of_stream(Pad.ref_t(), State.t()) :: State.stateful_try_t()
@@ -27,7 +28,7 @@ defmodule Membrane.Core.Element.EventController do
   """
   @spec handle_event(Pad.ref_t(), Event.t(), State.t()) :: State.stateful_try_t()
   def handle_event(pad_ref, event, state) do
-    Telemetry.report_metric("event", 1, inspect(pad_ref))
+    Telemetry.report_metric(:event, 1, inspect(pad_ref))
 
     pad_data = PadModel.get_data!(state, pad_ref)
 
@@ -95,7 +96,7 @@ defmodule Membrane.Core.Element.EventController do
         state
       )
 
-    if state.watcher, do: Message.send(state.watcher, callback, [state.name, pad_ref])
+    Message.send(state.parent_pid, callback, [state.name, pad_ref])
 
     res
   end
